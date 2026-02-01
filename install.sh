@@ -237,13 +237,24 @@ else
   CANOPY_API_PORT="${CANOPY_API_PORT:-${CANOPY_API_PORT_DEFAULT}}"
 
   echo
+  production_default="Y"
+  production_prompt="[Y/n]"
+  if [[ "${NODE_ENV_DEFAULT}" == "development" ]]; then
+    production_default="N"
+    production_prompt="[y/N]"
+  fi
   while true; do
-    read -r -p "is this a production or development build? [${NODE_ENV_DEFAULT}]: " NODE_ENV
-    NODE_ENV="${NODE_ENV:-${NODE_ENV_DEFAULT}}"
-    if [[ "${NODE_ENV}" == "production" || "${NODE_ENV}" == "development" ]]; then
+    read -r -p "is this a production build? ${production_prompt}: " PRODUCTION_REPLY
+    PRODUCTION_REPLY="${PRODUCTION_REPLY:-${production_default}}"
+    if [[ "${PRODUCTION_REPLY}" =~ ^[Yy]$ ]]; then
+      NODE_ENV="production"
       break
     fi
-    echo "invalid environment: enter 'production' or 'development'"
+    if [[ "${PRODUCTION_REPLY}" =~ ^[Nn]$ ]]; then
+      NODE_ENV="development"
+      break
+    fi
+    echo "invalid response: enter 'y' or 'n'"
   done
 
   echo
