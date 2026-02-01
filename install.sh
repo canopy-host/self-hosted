@@ -157,7 +157,7 @@ read_env_value() {
 
 print_banner
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 ENV_FILE_HOST="${ENV_FILE_HOST:-.env.local}"
 ENV_FILE_DOCKER="${ENV_FILE_DOCKER:-.env.docker}"
