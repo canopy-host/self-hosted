@@ -32,6 +32,116 @@ ART
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing dependency: $1" >&2; exit 1; }; }
 
+is_port_in_use() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -n -P -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    nc -z 127.0.0.1 "${port}" >/dev/null 2>&1
+    return $?
+  fi
+  python - <<'PY' "${port}"
+import socket, sys
+port = int(sys.argv[1])
+sock = socket.socket()
+try:
+  sock.bind(("127.0.0.1", port))
+except OSError:
+  sys.exit(0)  # in use
+else:
+  sys.exit(1)  # free
+finally:
+  sock.close()
+PY
+}
+
+assert_ports_free() {
+  local ports=("$@")
+  local in_use=()
+  local port
+  for port in "${ports[@]}"; do
+    if is_port_in_use "${port}"; then
+      in_use+=("${port}")
+    fi
+  done
+  if [[ "${#in_use[@]}" -gt 0 ]]; then
+    echo "the following ports are already in use: ${in_use[*]}" >&2
+    echo "please free these ports or choose different values before continuing." >&2
+    exit 1
+  fi
+}
+
+validate_port_value() {
+  local label="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "invalid ${label} port: must be numeric" >&2
+    exit 1
+  fi
+  if (( value < 1024 || value > 65535 )); then
+    echo "invalid ${label} port: must be between 1024 and 65535" >&2
+    exit 1
+  fi
+}
+
+parse_compose_ports() {
+  local file="$1"
+  [[ -f "${file}" ]] || return 1
+  rg -o '^[[:space:]]*-[[:space:]]*"?[0-9]+:[0-9]+' "${file}" \
+    | awk -F: '{gsub(/[^0-9]/, "", $1); if ($1 != "") print $1}'
+}
+
+replace_compose_port() {
+  local file="$1"
+  local old_port="$2"
+  local new_port="$3"
+  python - <<'PY' "${file}" "${old_port}" "${new_port}"
+import sys
+path, old_port, new_port = sys.argv[1], sys.argv[2], sys.argv[3]
+old_patterns = [
+  f'- "{old_port}:',
+  f"- '{old_port}:",
+  f"- {old_port}:",
+]
+new_patterns = [
+  f'- "{new_port}:',
+  f"- '{new_port}:",
+  f"- {new_port}:",
+]
+with open(path, "r", encoding="utf-8") as f:
+  data = f.read()
+for old, new in zip(old_patterns, new_patterns):
+  data = data.replace(old, new)
+with open(path, "w", encoding="utf-8") as f:
+  f.write(data)
+PY
+}
+
+prompt_for_port_change() {
+  local label="$1"
+  local current="$2"
+  local reply
+  while true; do
+    read -r -p "${label} port ${current} is in use. enter a new port (1024-65535) or press enter to cancel: " reply
+    if [[ -z "${reply}" ]]; then
+      echo "install cancelled"
+      exit 1
+    fi
+    if [[ ! "${reply}" =~ ^[0-9]+$ ]]; then
+      echo "invalid port: must be numeric"
+      continue
+    fi
+    if (( reply < 1024 || reply > 65535 )); then
+      echo "invalid port: must be between 1024 and 65535"
+      continue
+    fi
+    echo "${reply}"
+    return 0
+  done
+}
+
 read_env_value() {
   local key="$1"
   local file="$2"
@@ -57,6 +167,11 @@ CANOPY_STORAGE_ROOT="${CANOPY_STORAGE_ROOT:-$HOME/.canopy/storage}"
 DOKKU_SETUP="${DOKKU_SETUP:-true}"
 IMAGE_USER="${IMAGE_USER:-thecanopycorp}"
 IMAGE_TAG="${IMAGE_TAG:-1.0}"
+CANOPY_WEB_PORT="${CANOPY_WEB_PORT:-3000}"
+VAULT_PORT="${VAULT_PORT:-8200}"
+DOKKU_SSH_PORT="${DOKKU_SSH_PORT:-3022}"
+DOKKU_HTTP_PORT="${DOKKU_HTTP_PORT:-8080}"
+DOKKU_HTTPS_PORT="${DOKKU_HTTPS_PORT:-8443}"
 
 API_IMAGE="${IMAGE_USER}/api:${IMAGE_TAG}"
 APP_IMAGE="${IMAGE_USER}/app:${IMAGE_TAG}"
@@ -82,6 +197,11 @@ echo " - CANOPY_STORAGE_ROOT=${CANOPY_STORAGE_ROOT}"
 echo " - DOKKU_SETUP=${DOKKU_SETUP}"
 echo " - API_IMAGE=${API_IMAGE}"
 echo " - APP_IMAGE=${APP_IMAGE}"
+echo " - CANOPY_WEB_PORT=${CANOPY_WEB_PORT}"
+echo " - VAULT_PORT=${VAULT_PORT}"
+echo " - DOKKU_SSH_PORT=${DOKKU_SSH_PORT}"
+echo " - DOKKU_HTTP_PORT=${DOKKU_HTTP_PORT}"
+echo " - DOKKU_HTTPS_PORT=${DOKKU_HTTPS_PORT}"
 echo
 
 need docker
@@ -138,6 +258,100 @@ else
   SUPABASE_JWT_SECRET="${SUPABASE_JWT_SECRET:-${existing_jwt_secret}}"
 fi
 
+validate_port_value "canopy api" "${CANOPY_API_PORT}"
+validate_port_value "canopy web" "${CANOPY_WEB_PORT}"
+validate_port_value "vault" "${VAULT_PORT}"
+if [[ "${DOKKU_SETUP}" == "true" ]]; then
+  validate_port_value "dokku ssh" "${DOKKU_SSH_PORT}"
+  validate_port_value "dokku http" "${DOKKU_HTTP_PORT}"
+  validate_port_value "dokku https" "${DOKKU_HTTPS_PORT}"
+fi
+
+ports_to_check=()
+if [[ -f docker-compose.yml ]]; then
+  while IFS= read -r port; do
+    ports_to_check+=("${port}")
+  done < <(parse_compose_ports docker-compose.yml || true)
+else
+  if [[ "${START_API}" == "true" ]]; then
+    ports_to_check+=("${CANOPY_API_PORT}" "${CANOPY_WEB_PORT}" "${VAULT_PORT}")
+  fi
+  if [[ "${DOKKU_SETUP}" == "true" ]]; then
+    ports_to_check+=("${DOKKU_SSH_PORT}" "${DOKKU_HTTP_PORT}" "${DOKKU_HTTPS_PORT}")
+  fi
+fi
+
+if [[ "${#ports_to_check[@]}" -gt 0 ]]; then
+  unique_ports=()
+  for port in "${ports_to_check[@]}"; do
+    if [[ " ${unique_ports[*]} " != *" ${port} "* ]]; then
+      unique_ports+=("${port}")
+    fi
+  done
+  echo "checking required ports are available..."
+  in_use_ports=()
+  for port in "${unique_ports[@]}"; do
+    if is_port_in_use "${port}"; then
+      in_use_ports+=("${port}")
+    fi
+  done
+  if [[ "${#in_use_ports[@]}" -gt 0 ]]; then
+    for port in "${in_use_ports[@]}"; do
+      case "${port}" in
+        "${CANOPY_API_PORT}")
+          new_port="$(prompt_for_port_change "canopy api" "${port}")"
+          CANOPY_API_PORT="${new_port}"
+          ;;
+        "${CANOPY_WEB_PORT}")
+          new_port="$(prompt_for_port_change "canopy web" "${port}")"
+          CANOPY_WEB_PORT="${new_port}"
+          ;;
+        "${VAULT_PORT}")
+          new_port="$(prompt_for_port_change "vault" "${port}")"
+          VAULT_PORT="${new_port}"
+          ;;
+        "${DOKKU_SSH_PORT}")
+          new_port="$(prompt_for_port_change "dokku ssh" "${port}")"
+          DOKKU_SSH_PORT="${new_port}"
+          ;;
+        "${DOKKU_HTTP_PORT}")
+          new_port="$(prompt_for_port_change "dokku http" "${port}")"
+          DOKKU_HTTP_PORT="${new_port}"
+          ;;
+        "${DOKKU_HTTPS_PORT}")
+          new_port="$(prompt_for_port_change "dokku https" "${port}")"
+          DOKKU_HTTPS_PORT="${new_port}"
+          ;;
+        *)
+          echo "port ${port} is in use and is not configurable by this installer." >&2
+          echo "please free it before continuing." >&2
+          exit 1
+          ;;
+      esac
+      if [[ -f docker-compose.yml ]]; then
+        replace_compose_port docker-compose.yml "${port}" "${new_port}"
+      fi
+    done
+  fi
+  final_ports=()
+  if [[ -f docker-compose.yml ]]; then
+    while IFS= read -r port; do
+      final_ports+=("${port}")
+    done < <(parse_compose_ports docker-compose.yml || true)
+  else
+    if [[ "${START_API}" == "true" ]]; then
+      final_ports+=("${CANOPY_API_PORT}" "${CANOPY_WEB_PORT}" "${VAULT_PORT}")
+    fi
+    if [[ "${DOKKU_SETUP}" == "true" ]]; then
+      final_ports+=("${DOKKU_SSH_PORT}" "${DOKKU_HTTP_PORT}" "${DOKKU_HTTPS_PORT}")
+    fi
+  fi
+  if [[ "${#final_ports[@]}" -gt 0 ]]; then
+    assert_ports_free "${final_ports[@]}"
+  fi
+  echo "all required ports are available"
+fi
+
 mkdir -p "${CANOPY_STORAGE_ROOT}/supabase" "${CANOPY_STORAGE_ROOT}/api" "${CANOPY_STORAGE_ROOT}/vault" "${CANOPY_STORAGE_ROOT}/app"
 
 echo "storage directories created under ${CANOPY_STORAGE_ROOT}"
@@ -191,7 +405,7 @@ services:
     cap_add:
       - IPC_LOCK
     ports:
-      - "8200:8200"
+      - "${VAULT_PORT}:8200"
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: root
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
@@ -227,7 +441,7 @@ services:
     image: ${APP_IMAGE}
     platform: linux/amd64
     ports:
-      - "3000:3000"
+      - "${CANOPY_WEB_PORT}:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -240,9 +454,9 @@ services:
     platform: linux/amd64
     container_name: dokku
     ports:
-      - "3022:22"
-      - "8080:80"
-      - "8443:443"
+      - "${DOKKU_SSH_PORT}:22"
+      - "${DOKKU_HTTP_PORT}:80"
+      - "${DOKKU_HTTPS_PORT}:443"
     volumes:
       - dokku-data:/mnt/dokku
       - /var/run/docker.sock:/var/run/docker.sock
