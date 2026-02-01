@@ -184,8 +184,10 @@ existing_supabase_url="$(read_env_value SUPABASE_URL "${ENV_FILE_HOST}" || true)
 existing_supabase_key="$(read_env_value SUPABASE_SERVICE_ROLE_KEY "${ENV_FILE_HOST}" || true)"
 existing_anon_key="$(read_env_value SUPABASE_ANON_KEY "${ENV_FILE_HOST}" || true)"
 existing_jwt_secret="$(read_env_value SUPABASE_JWT_SECRET "${ENV_FILE_HOST}" || true)"
+existing_node_env="$(read_env_value NODE_ENV "${ENV_FILE_HOST}" || true)"
 
 CANOPY_API_PORT_DEFAULT="${existing_port:-${DEFAULT_CANOPY_API_PORT}}"
+NODE_ENV_DEFAULT="${existing_node_env:-production}"
 
 echo
 echo "install settings"
@@ -229,9 +231,20 @@ if [[ "${REUSE_CONFIG}" =~ ^[Yy]$ ]]; then
   SUPABASE_SERVICE_ROLE_KEY="${existing_supabase_key}"
   SUPABASE_ANON_KEY="${existing_anon_key}"
   SUPABASE_JWT_SECRET="${existing_jwt_secret}"
+  NODE_ENV="${NODE_ENV_DEFAULT}"
 else
   read -r -p "which port should the canopy API run on? [${CANOPY_API_PORT_DEFAULT}]: " CANOPY_API_PORT
   CANOPY_API_PORT="${CANOPY_API_PORT:-${CANOPY_API_PORT_DEFAULT}}"
+
+  echo
+  while true; do
+    read -r -p "is this a production or development build? [${NODE_ENV_DEFAULT}]: " NODE_ENV
+    NODE_ENV="${NODE_ENV:-${NODE_ENV_DEFAULT}}"
+    if [[ "${NODE_ENV}" == "production" || "${NODE_ENV}" == "development" ]]; then
+      break
+    fi
+    echo "invalid environment: enter 'production' or 'development'"
+  done
 
   echo
   read -r -p "api domain (example: api.example.com) [${existing_domain}]: " API_DOMAIN
@@ -367,13 +380,15 @@ write_env_file() {
   local supabaseAnonKey="${8-}"
   local supabaseJwtSecret="${9-}"
   local storageRoot="${10-}"
+  local nodeEnv="${11-}"
 
-  if [[ "$#" -lt 10 ]]; then
-    echo "write_env_file expects 10 arguments, got $#." >&2
+  if [[ "$#" -lt 11 ]]; then
+    echo "write_env_file expects 11 arguments, got $#." >&2
     exit 1
   fi
 
   cat > "${envFile}" <<EOF
+NODE_ENV='${nodeEnv}'
 SUPABASE_URL='${supabaseUrl}'
 SUPABASE_API_URL='${supabaseUrl}'
 SUPABASE_SERVICE_ROLE_KEY='${supabaseServiceRoleKey}'
@@ -398,8 +413,8 @@ EOF
   echo "wrote ${envFile}"
 }
 
-write_env_file "${ENV_FILE_HOST}" "${CANOPY_API_PORT}" "${API_DOMAIN}" "${GITHUB_CLIENT_ID}" "${GITHUB_CLIENT_SECRET}" "${SUPABASE_URL}" "${SUPABASE_SERVICE_ROLE_KEY}" "${SUPABASE_ANON_KEY}" "${SUPABASE_JWT_SECRET}" "${CANOPY_STORAGE_ROOT}"
-write_env_file "${ENV_FILE_DOCKER}" "${CANOPY_API_PORT}" "${API_DOMAIN}" "${GITHUB_CLIENT_ID}" "${GITHUB_CLIENT_SECRET}" "${SUPABASE_URL}" "${SUPABASE_SERVICE_ROLE_KEY}" "${SUPABASE_ANON_KEY}" "${SUPABASE_JWT_SECRET}" "${CANOPY_STORAGE_ROOT}"
+write_env_file "${ENV_FILE_HOST}" "${CANOPY_API_PORT}" "${API_DOMAIN}" "${GITHUB_CLIENT_ID}" "${GITHUB_CLIENT_SECRET}" "${SUPABASE_URL}" "${SUPABASE_SERVICE_ROLE_KEY}" "${SUPABASE_ANON_KEY}" "${SUPABASE_JWT_SECRET}" "${CANOPY_STORAGE_ROOT}" "${NODE_ENV}"
+write_env_file "${ENV_FILE_DOCKER}" "${CANOPY_API_PORT}" "${API_DOMAIN}" "${GITHUB_CLIENT_ID}" "${GITHUB_CLIENT_SECRET}" "${SUPABASE_URL}" "${SUPABASE_SERVICE_ROLE_KEY}" "${SUPABASE_ANON_KEY}" "${SUPABASE_JWT_SECRET}" "${CANOPY_STORAGE_ROOT}" "${NODE_ENV}"
 
 if [[ ! -f docker-compose.yml ]]; then
   cat > docker-compose.yml <<YAML
@@ -432,7 +447,7 @@ services:
     env_file:
       - .env.docker
     environment:
-      NODE_ENV: production
+      NODE_ENV: "${NODE_ENV:-production}"
       PRODUCTION_API_SERVICE_PORT: "${PRODUCTION_API_SERVICE_PORT:-3000}"
       RUN_MIGRATIONS: "false"
       RUN_SEEDS: "false"
@@ -448,7 +463,7 @@ services:
     ports:
       - "${CANOPY_WEB_PORT}:3000"
     environment:
-      NODE_ENV: production
+      NODE_ENV: "${NODE_ENV:-production}"
       PORT: 3000
       NEXT_PUBLIC_BASE_URL: "http://localhost:${PRODUCTION_API_SERVICE_PORT:-3000}"
     volumes:
