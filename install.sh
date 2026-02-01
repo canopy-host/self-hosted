@@ -357,16 +357,21 @@ mkdir -p "${CANOPY_STORAGE_ROOT}/supabase" "${CANOPY_STORAGE_ROOT}/api" "${CANOP
 echo "storage directories created under ${CANOPY_STORAGE_ROOT}"
 
 write_env_file() {
-  local envFile="$1"
-  local canopyApiPort="$2"
-  local apiDomain="$3"
-  local githubClientId="$4"
-  local githubClientSecret="$5"
-  local supabaseUrl="$6"
-  local supabaseServiceRoleKey="$7"
-  local supabaseAnonKey="$8"
-  local supabaseJwtSecret="$9"
-  local storageRoot="${10}"
+  local envFile="${1-}"
+  local canopyApiPort="${2-}"
+  local apiDomain="${3-}"
+  local githubClientId="${4-}"
+  local githubClientSecret="${5-}"
+  local supabaseUrl="${6-}"
+  local supabaseServiceRoleKey="${7-}"
+  local supabaseAnonKey="${8-}"
+  local supabaseJwtSecret="${9-}"
+  local storageRoot="${10-}"
+
+  if [[ "$#" -lt 10 ]]; then
+    echo "write_env_file expects 10 arguments, got $#." >&2
+    exit 1
+  fi
 
   cat > "${envFile}" <<EOF
 SUPABASE_URL='${supabaseUrl}'
